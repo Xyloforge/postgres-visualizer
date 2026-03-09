@@ -606,6 +606,15 @@ export default function App() {
   const handleClear = () => setSql("");
   const handleReset = () => setSql(DEFAULT_SQL);
   const handleCopy = () => { navigator.clipboard.writeText(sql); };
+  const handleDownload = () => {
+    const blob = new Blob([sql], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "schema.sql";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div style={{ height: "100vh", display: "flex", flexDirection: "column", background: "#11111b", color: "#cdd6f4", fontFamily: "'Inter','Segoe UI',sans-serif" }}>
@@ -643,6 +652,7 @@ export default function App() {
 
         <div style={{ width: 1, height: 24, background: "#313244" }} />
         <button onClick={handleCopy} style={toolBtnStyle}>Copy SQL</button>
+        <button onClick={handleDownload} style={toolBtnStyle}>Download .sql</button>
         <button onClick={handleClear} style={toolBtnStyle}>Clear</button>
         <button onClick={handleReset} style={{ ...toolBtnStyle, color: "#94e2d5" }}>Demo</button>
       </div>
