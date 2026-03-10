@@ -5,11 +5,15 @@ function parseSQL(sql) {
   const enums = [];
   const tables = [];
 
+  const lineOf = (idx) => sql.slice(0, idx).split("\n").length - 1;
+
   const enumRe = /CREATE\s+TYPE\s+(\w+)\s+AS\s+ENUM\s*\(([^)]+)\)/gi;
   let m;
   while ((m = enumRe.exec(sql))) {
     const values = m[2].match(/'([^']+)'/g)?.map((v) => v.replace(/'/g, "")) || [];
-    enums.push({ name: m[1], values });
+    const lineStart = lineOf(m.index);
+    const lineEnd = lineStart + m[0].split("\n").length - 1;
+    enums.push({ name: m[1], values, lineStart, lineEnd });
   }
 
   const tableRe = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*\(([\s\S]*?)\);/gi;
@@ -80,7 +84,9 @@ function parseSQL(sql) {
         }
       }
     }
-    tables.push({ name: tableName, columns, constraints, foreignKeys });
+    const lineStart = lineOf(m.index);
+    const lineEnd = lineStart + m[0].split("\n").length - 1;
+    tables.push({ name: tableName, columns, constraints, foreignKeys, lineStart, lineEnd });
   }
 
   const indexes = [];
@@ -186,12 +192,26 @@ const TOKEN_COLORS = {
 };
 
 // ── SQL Editor ──────────────────────────────────────────────────────────────
-function SQLEditor({ value, onChange }) {
+const LINE_H = 20;
+
+function SQLEditor({ value, onChange, focusRange }) {
   const textareaRef = useRef(null);
   const highlightRef = useRef(null);
   const lineNumRef = useRef(null);
   const lines = value.split("\n");
-  const tokens = useMemo(() => highlightSQL(value), [value]);
+
+  // Group tokens by line for per-line dim support
+  const tokenLines = useMemo(() => {
+    const all = highlightSQL(value);
+    const result = [];
+    let cur = [];
+    for (const t of all) {
+      if (t.type === "newline") { result.push(cur); cur = []; }
+      else cur.push(t);
+    }
+    result.push(cur);
+    return result;
+  }, [value]);
 
   const syncScroll = useCallback(() => {
     if (textareaRef.current && highlightRef.current && lineNumRef.current) {
@@ -200,6 +220,15 @@ function SQLEditor({ value, onChange }) {
       lineNumRef.current.scrollTop = textareaRef.current.scrollTop;
     }
   }, []);
+
+  // Scroll to focused range when it changes
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta || !focusRange) return;
+    const targetTop = focusRange.start * LINE_H - 40;
+    ta.scrollTop = Math.max(0, targetTop);
+    syncScroll();
+  }, [focusRange, syncScroll]);
 
   const handleTab = (e) => {
     if (e.key === "Tab") {
@@ -214,13 +243,22 @@ function SQLEditor({ value, onChange }) {
   };
 
   return (
-    <div style={{ display: "flex", height: "100%", position: "relative", fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',monospace", fontSize: 13, lineHeight: "20px" }}>
+    <div style={{ display: "flex", height: "100%", position: "relative", fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',monospace", fontSize: 13, lineHeight: `${LINE_H}px` }}>
       <div ref={lineNumRef} style={{ width: 48, overflowY: "hidden", background: "#181825", color: "#585b70", textAlign: "right", padding: "12px 8px 12px 0", userSelect: "none", flexShrink: 0, borderRight: "1px solid #313244" }}>
-        {lines.map((_, i) => <div key={i} style={{ height: 20, fontSize: 12, lineHeight: "20px" }}>{i + 1}</div>)}
+        {lines.map((_, i) => (
+          <div key={i} style={{ height: LINE_H, fontSize: 12, lineHeight: `${LINE_H}px`, color: focusRange && (i < focusRange.start || i > focusRange.end) ? "#313244" : "#585b70" }}>{i + 1}</div>
+        ))}
       </div>
       <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
         <pre ref={highlightRef} aria-hidden style={{ position: "absolute", inset: 0, margin: 0, padding: 12, overflow: "auto", whiteSpace: "pre", color: "#cdd6f4", pointerEvents: "none", zIndex: 1 }}>
-          {tokens.map((t, i) => t.type === "newline" ? "\n" : <span key={i} style={{ color: TOKEN_COLORS[t.type] || "#cdd6f4" }}>{t.text}</span>)}
+          {tokenLines.map((lineTokens, i) => {
+            const dimmed = focusRange && (i < focusRange.start || i > focusRange.end);
+            return (
+              <span key={i} style={{ display: "block", height: LINE_H, opacity: dimmed ? 0.2 : 1 }}>
+                {lineTokens.map((t, j) => <span key={j} style={{ color: TOKEN_COLORS[t.type] || "#cdd6f4" }}>{t.text}</span>)}
+              </span>
+            );
+          })}
         </pre>
         <textarea
           ref={textareaRef} value={value} onChange={(e) => onChange(e.target.value)}
@@ -277,7 +315,7 @@ function loadSavedPositions() {
   try { return JSON.parse(localStorage.getItem(POSITIONS_KEY)) || {}; } catch { return {}; }
 }
 
-function ERDiagram({ schema }) {
+function ERDiagram({ schema, onFocusRange }) {
   const svgRef = useRef(null);
   const containerRef = useRef(null);
   const [positions, setPositions] = useState({});
@@ -286,8 +324,36 @@ function ERDiagram({ schema }) {
   const [zoom, setZoom] = useState(0.85);
   const [isPanning, setIsPanning] = useState(false);
   const panStart = useRef(null);
+  const didDrag = useRef(false);
   const [hovered, setHovered] = useState(null);
-  const [selectedTable, setSelectedTable] = useState(null);
+  const [selection, setSelection] = useState(new Set());
+  const [selBox, setSelBox] = useState(null);
+  const [containerSize, setContainerSize] = useState({ w: 1400, h: 800 });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      setContainerSize({ w: entry.contentRect.width, h: entry.contentRect.height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // single selected table (not enum) → drives the detail panel
+  const singleSel = selection.size === 1 ? [...selection][0] : null;
+  const selTable = singleSel && !singleSel.startsWith("enum:") ? schema.tables.find((t) => t.name === singleSel) : null;
+  const selIndexes = selTable ? schema.indexes?.filter((i) => i.table === singleSel) || [] : [];
+
+  useEffect(() => {
+    if (!onFocusRange) return;
+    if (!singleSel) { onFocusRange(null); return; }
+    const isEnum = singleSel.startsWith("enum:");
+    const item = isEnum
+      ? schema.enums.find((e) => e.name === singleSel.slice(5))
+      : schema.tables.find((t) => t.name === singleSel);
+    onFocusRange(item ? { start: item.lineStart, end: item.lineEnd } : null);
+  }, [singleSel, schema, onFocusRange]);
 
   useEffect(() => {
     const defaults = layoutPositions(schema.tables, schema.enums);
@@ -297,22 +363,38 @@ function ERDiagram({ schema }) {
       if (saved[key]) merged[key] = { ...defaults[key], x: saved[key].x, y: saved[key].y };
     }
     setPositions(merged);
-    setSelectedTable(null);
+    setSelection(new Set());
   }, [schema]);
 
   const startDrag = (name, e) => {
     e.stopPropagation();
-    const pos = positions[name];
-    setDragging({ name, ox: e.clientX / zoom - pos.x + pan.x / zoom, oy: e.clientY / zoom - pos.y + pan.y / zoom });
+    didDrag.current = false;
+    if (e.shiftKey) return; // shift clicks are handled in onClick
+    const names = selection.has(name) ? [...selection] : [name];
+    const offsets = {};
+    for (const n of names) {
+      const pos = positions[n];
+      if (pos) offsets[n] = { ox: e.clientX / zoom - pos.x + pan.x / zoom, oy: e.clientY / zoom - pos.y + pan.y / zoom };
+    }
+    setDragging({ names, offsets });
   };
 
   const onMouseMove = useCallback((e) => {
     if (dragging) {
-      setPositions((p) => ({ ...p, [dragging.name]: { ...p[dragging.name], x: e.clientX / zoom - dragging.ox + pan.x / zoom, y: e.clientY / zoom - dragging.oy + pan.y / zoom } }));
+      didDrag.current = true;
+      setPositions((p) => {
+        const next = { ...p };
+        for (const n of dragging.names) {
+          if (dragging.offsets[n]) next[n] = { ...p[n], x: e.clientX / zoom - dragging.offsets[n].ox + pan.x / zoom, y: e.clientY / zoom - dragging.offsets[n].oy + pan.y / zoom };
+        }
+        return next;
+      });
+    } else if (selBox) {
+      setSelBox((b) => ({ ...b, ex: e.clientX, ey: e.clientY }));
     } else if (isPanning && panStart.current) {
       setPan({ x: panStart.current.panX + (panStart.current.sx - e.clientX), y: panStart.current.panY + (panStart.current.sy - e.clientY) });
     }
-  }, [dragging, isPanning, zoom, pan]);
+  }, [dragging, selBox, isPanning, zoom, pan]);
 
   const onMouseUp = useCallback(() => {
     if (dragging) {
@@ -324,10 +406,24 @@ function ERDiagram({ schema }) {
         return p;
       });
     }
+    if (selBox) {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (rect) {
+        const toWorld = (sx, sy) => ({ x: pan.x / zoom + (sx - rect.left) / zoom, y: pan.y / zoom + (sy - rect.top) / zoom });
+        const a = toWorld(Math.min(selBox.sx, selBox.ex), Math.min(selBox.sy, selBox.ey));
+        const b = toWorld(Math.max(selBox.sx, selBox.ex), Math.max(selBox.sy, selBox.ey));
+        const inside = new Set();
+        for (const [name, pos] of Object.entries(positions)) {
+          if (pos.x + pos.w > a.x && pos.x < b.x && pos.y + pos.h > a.y && pos.y < b.y) inside.add(name);
+        }
+        if (inside.size > 0) setSelection(inside);
+      }
+      setSelBox(null);
+    }
     setDragging(null);
     setIsPanning(false);
     panStart.current = null;
-  }, [dragging]);
+  }, [dragging, selBox, pan, zoom, positions]);
 
   useEffect(() => {
     window.addEventListener("mousemove", onMouseMove);
@@ -337,9 +433,13 @@ function ERDiagram({ schema }) {
 
   const onBgMouseDown = (e) => {
     if (e.target === svgRef.current || e.target.classList.contains("er-bg")) {
-      setIsPanning(true);
-      panStart.current = { sx: e.clientX, sy: e.clientY, panX: pan.x, panY: pan.y };
-      setSelectedTable(null);
+      if (e.shiftKey) {
+        setSelBox({ sx: e.clientX, sy: e.clientY, ex: e.clientX, ey: e.clientY });
+      } else {
+        setIsPanning(true);
+        panStart.current = { sx: e.clientX, sy: e.clientY, panX: pan.x, panY: pan.y };
+        setSelection(new Set());
+      }
     }
   };
 
@@ -359,6 +459,15 @@ function ERDiagram({ schema }) {
     if (el) el.addEventListener("wheel", onWheel, { passive: false });
     return () => { if (el) el.removeEventListener("wheel", onWheel); };
   }, [onWheel]);
+
+  const toggleSelect = (name, e) => {
+    e.stopPropagation();
+    setSelection((prev) => {
+      const next = new Set(prev);
+      next.has(name) ? next.delete(name) : next.add(name);
+      return next;
+    });
+  };
 
   const relations = [];
   for (const t of schema.tables) {
@@ -383,15 +492,14 @@ function ERDiagram({ schema }) {
     setPan({ x: 0, y: 0 });
   };
 
-  const viewBox = `${pan.x / zoom} ${pan.y / zoom} ${(containerRef.current?.clientWidth || 1400) / zoom} ${(containerRef.current?.clientHeight || 800) / zoom}`;
-  const selTable = schema.tables.find((t) => t.name === selectedTable);
-  const selIndexes = schema.indexes?.filter((i) => i.table === selectedTable) || [];
+  const viewBox = `${pan.x / zoom} ${pan.y / zoom} ${containerSize.w / zoom} ${containerSize.h / zoom}`;
+  const containerRect = containerRef.current?.getBoundingClientRect();
 
   return (
     <div style={{ display: "flex", height: "100%", background: "#11111b" }}>
-      <div ref={containerRef} style={{ flex: 1, cursor: isPanning ? "grabbing" : "grab", overflow: "hidden", position: "relative" }}>
+      <div ref={containerRef} style={{ flex: 1, cursor: isPanning ? "grabbing" : selBox ? "crosshair" : "grab", overflow: "hidden", position: "relative" }}>
         {/* Zoom controls */}
-        <div style={{ position: "absolute", bottom: 16, right: selectedTable ? 336 : 16, zIndex: 10, display: "flex", gap: 4, background: "#1e1e2e", borderRadius: 8, padding: 4, border: "1px solid #313244", transition: "right 0.2s" }}>
+        <div style={{ position: "absolute", bottom: 16, right: selTable ? 336 : 16, zIndex: 10, display: "flex", gap: 4, background: "#1e1e2e", borderRadius: 8, padding: 4, border: "1px solid #313244", transition: "right 0.2s" }}>
           <button onClick={() => setZoom((z) => Math.min(2, z + 0.15))} style={zoomBtnStyle}>+</button>
           <span style={{ color: "#a6adc8", fontSize: 12, padding: "4px 8px", minWidth: 44, textAlign: "center" }}>{Math.round(zoom * 100)}%</span>
           <button onClick={() => setZoom((z) => Math.max(0.2, z - 0.15))} style={zoomBtnStyle}>−</button>
@@ -399,6 +507,18 @@ function ERDiagram({ schema }) {
           <div style={{ width: 1, background: "#45475a", margin: "4px 2px" }} />
           <button onClick={resetLayout} style={{ ...zoomBtnStyle, fontSize: 11, padding: "4px 8px", color: "#f38ba8" }} title="Reset card positions to default layout">Reset Layout</button>
         </div>
+
+        {/* Selection box overlay */}
+        {selBox && containerRect && (
+          <div style={{ position: "absolute", pointerEvents: "none", zIndex: 5, border: "1.5px dashed #89b4fa", background: "rgba(137,180,250,0.07)", borderRadius: 2, left: Math.min(selBox.sx, selBox.ex) - containerRect.left, top: Math.min(selBox.sy, selBox.ey) - containerRect.top, width: Math.abs(selBox.ex - selBox.sx), height: Math.abs(selBox.ey - selBox.sy) }} />
+        )}
+
+        {/* Selection count badge */}
+        {selection.size > 1 && (
+          <div style={{ position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)", zIndex: 10, background: "#313244", border: "1px solid #89b4fa", color: "#89b4fa", fontSize: 12, padding: "3px 12px", borderRadius: 12, fontFamily: "monospace", pointerEvents: "none" }}>
+            {selection.size} selected
+          </div>
+        )}
 
         <svg ref={svgRef} width="100%" height="100%" viewBox={viewBox} onMouseDown={onBgMouseDown} style={{ display: "block" }}>
           <defs>
@@ -431,11 +551,13 @@ function ERDiagram({ schema }) {
 
           {/* Enums */}
           {schema.enums.map((en) => {
-            const pos = positions["enum:" + en.name];
+            const key = "enum:" + en.name;
+            const pos = positions[key];
             if (!pos) return null;
+            const isSel = selection.has(key);
             return (
-              <g key={"e:" + en.name} onMouseDown={(e) => startDrag("enum:" + en.name, e)} style={{ cursor: "move" }}>
-                <rect x={pos.x} y={pos.y} width={pos.w} height={pos.h} rx={8} fill="#1e1e2e" stroke="#45475a" strokeWidth={1} />
+              <g key={key} onMouseDown={(e) => startDrag(key, e)} onClick={(e) => { if (didDrag.current) return; e.shiftKey ? toggleSelect(key, e) : (e.stopPropagation(), setSelection(new Set([key]))); }} style={{ cursor: "move" }}>
+                <rect x={pos.x} y={pos.y} width={pos.w} height={pos.h} rx={8} fill="#1e1e2e" stroke={isSel ? "#cba6f7" : "#45475a"} strokeWidth={isSel ? 2 : 1} />
                 <rect x={pos.x} y={pos.y} width={pos.w} height={28} rx={8} fill="#45475a" />
                 <rect x={pos.x} y={pos.y + 20} width={pos.w} height={8} fill="#45475a" />
                 <text x={pos.x + 10} y={pos.y + 19} fill="#cba6f7" fontSize={12} fontWeight={700} fontFamily="monospace">⟨enum⟩ {en.name}</text>
@@ -450,9 +572,11 @@ function ERDiagram({ schema }) {
             if (!pos) return null;
             const color = TABLE_COLORS[ti % TABLE_COLORS.length];
             const isHov = hovered === t.name;
-            const isSel = selectedTable === t.name;
+            const isSel = selection.has(t.name);
             return (
-              <g key={t.name} onMouseDown={(e) => startDrag(t.name, e)} onMouseEnter={() => setHovered(t.name)} onMouseLeave={() => setHovered(null)} onClick={(e) => { e.stopPropagation(); setSelectedTable(t.name); }} style={{ cursor: "move" }}
+              <g key={t.name} onMouseDown={(e) => startDrag(t.name, e)} onMouseEnter={() => setHovered(t.name)} onMouseLeave={() => setHovered(null)}
+                onClick={(e) => { if (didDrag.current) return; e.stopPropagation(); if (e.shiftKey) { toggleSelect(t.name, e); } else { setSelection(new Set([t.name])); } }}
+                style={{ cursor: "move" }}
                 opacity={hovered && !isHov && !relations.some((r) => (r.from === t.name && r.to === hovered) || (r.to === t.name && r.from === hovered)) ? 0.4 : 1}>
                 <rect x={pos.x + 3} y={pos.y + 3} width={TABLE_W} height={pos.h} rx={10} fill="rgba(0,0,0,0.3)" />
                 <rect x={pos.x} y={pos.y} width={TABLE_W} height={pos.h} rx={10} fill="#1e1e2e" stroke={isSel ? color.header : isHov ? "#585b70" : "#313244"} strokeWidth={isSel ? 2.5 : isHov ? 2 : 1} />
@@ -481,8 +605,8 @@ function ERDiagram({ schema }) {
       {selTable && (
         <div style={{ width: 320, background: "#1e1e2e", borderLeft: "1px solid #313244", overflowY: "auto", padding: 20, flexShrink: 0 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-            <h3 style={{ margin: 0, color: "#cdd6f4", fontFamily: "monospace", fontSize: 16 }}>{selectedTable}</h3>
-            <button onClick={() => setSelectedTable(null)} style={{ background: "none", border: "none", color: "#6c7086", cursor: "pointer", fontSize: 18, padding: 4 }}>✕</button>
+            <h3 style={{ margin: 0, color: "#cdd6f4", fontFamily: "monospace", fontSize: 16 }}>{singleSel}</h3>
+            <button onClick={() => setSelection(new Set())} style={{ background: "none", border: "none", color: "#6c7086", cursor: "pointer", fontSize: 18, padding: 4 }}>✕</button>
           </div>
           <Section title="Columns">
             {selTable.columns.map((c) => (
@@ -628,6 +752,7 @@ export default function App() {
   const [splitView, setSplitView] = useState(true);
   const [activeTab, setActiveTab] = useState("diagram");
   const [parseError, setParseError] = useState(null);
+  const [focusRange, setFocusRange] = useState(null);
 
   const schema = useMemo(() => {
     try {
@@ -717,7 +842,7 @@ export default function App() {
         {(splitView || activeTab === "editor") && (
           <div style={{ width: splitView ? "42%" : "100%", display: "flex", flexDirection: "column", borderRight: splitView ? "2px solid #313244" : "none", flexShrink: 0 }}>
             <div style={{ flex: 1, overflow: "hidden", background: "#1e1e2e" }}>
-              <SQLEditor value={sql} onChange={handleSqlChange} />
+              <SQLEditor value={sql} onChange={handleSqlChange} focusRange={focusRange} />
             </div>
           </div>
         )}
@@ -730,7 +855,7 @@ export default function App() {
                 <span style={{ fontSize: 12, color: "#45475a" }}>or click Demo to load a sample schema</span>
               </div>
             ) : (
-              <ERDiagram schema={schema} />
+              <ERDiagram schema={schema} onFocusRange={setFocusRange} />
             )}
           </div>
         )}
