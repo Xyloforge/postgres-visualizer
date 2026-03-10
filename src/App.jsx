@@ -327,8 +327,18 @@ function ERDiagram({ schema, onFocusRange }) {
   const didDrag = useRef(false);
   const [hovered, setHovered] = useState(null);
   const [selection, setSelection] = useState(new Set());
+  const shiftSelected = useRef(false);
   const [selBox, setSelBox] = useState(null);
   const [containerSize, setContainerSize] = useState({ w: 1400, h: 800 });
+  const [spaceDown, setSpaceDown] = useState(false);
+
+  useEffect(() => {
+    const onKeyDown = (e) => { if (e.code === "Space" && e.target.tagName !== "TEXTAREA") { e.preventDefault(); setSpaceDown(true); } };
+    const onKeyUp = (e) => { if (e.code === "Space") setSpaceDown(false); };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => { window.removeEventListener("keydown", onKeyDown); window.removeEventListener("keyup", onKeyUp); };
+  }, []);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -341,7 +351,7 @@ function ERDiagram({ schema, onFocusRange }) {
   }, []);
 
   // single selected table (not enum) → drives the detail panel
-  const singleSel = selection.size === 1 ? [...selection][0] : null;
+  const singleSel = selection.size === 1 && !shiftSelected.current ? [...selection][0] : null;
   const selTable = singleSel && !singleSel.startsWith("enum:") ? schema.tables.find((t) => t.name === singleSel) : null;
   const selIndexes = selTable ? schema.indexes?.filter((i) => i.table === singleSel) || [] : [];
 
@@ -369,7 +379,12 @@ function ERDiagram({ schema, onFocusRange }) {
   const startDrag = (name, e) => {
     e.stopPropagation();
     didDrag.current = false;
-    if (e.shiftKey) return; // shift clicks are handled in onClick
+    if (e.shiftKey) return;
+    if (spaceDown) { // space = pan mode, even over cards
+      setIsPanning(true);
+      panStart.current = { sx: e.clientX, sy: e.clientY, panX: pan.x, panY: pan.y };
+      return;
+    }
     const names = selection.has(name) ? [...selection] : [name];
     const offsets = {};
     for (const n of names) {
@@ -433,11 +448,12 @@ function ERDiagram({ schema, onFocusRange }) {
 
   const onBgMouseDown = (e) => {
     if (e.target === svgRef.current || e.target.classList.contains("er-bg")) {
-      if (e.shiftKey) {
+      if (e.shiftKey && !spaceDown) {
         setSelBox({ sx: e.clientX, sy: e.clientY, ex: e.clientX, ey: e.clientY });
       } else {
         setIsPanning(true);
         panStart.current = { sx: e.clientX, sy: e.clientY, panX: pan.x, panY: pan.y };
+        shiftSelected.current = false;
         setSelection(new Set());
       }
     }
@@ -462,6 +478,7 @@ function ERDiagram({ schema, onFocusRange }) {
 
   const toggleSelect = (name, e) => {
     e.stopPropagation();
+    shiftSelected.current = true;
     setSelection((prev) => {
       const next = new Set(prev);
       next.has(name) ? next.delete(name) : next.add(name);
@@ -497,7 +514,7 @@ function ERDiagram({ schema, onFocusRange }) {
 
   return (
     <div style={{ display: "flex", height: "100%", background: "#11111b" }}>
-      <div ref={containerRef} style={{ flex: 1, cursor: isPanning ? "grabbing" : selBox ? "crosshair" : "grab", overflow: "hidden", position: "relative" }}>
+      <div ref={containerRef} style={{ flex: 1, cursor: isPanning ? "grabbing" : spaceDown ? "grab" : selBox ? "crosshair" : "default", overflow: "hidden", position: "relative" }}>
         {/* Zoom controls */}
         <div style={{ position: "absolute", bottom: 16, right: selTable ? 336 : 16, zIndex: 10, display: "flex", gap: 4, background: "#1e1e2e", borderRadius: 8, padding: 4, border: "1px solid #313244", transition: "right 0.2s" }}>
           <button onClick={() => setZoom((z) => Math.min(2, z + 0.15))} style={zoomBtnStyle}>+</button>
@@ -556,7 +573,7 @@ function ERDiagram({ schema, onFocusRange }) {
             if (!pos) return null;
             const isSel = selection.has(key);
             return (
-              <g key={key} onMouseDown={(e) => startDrag(key, e)} onClick={(e) => { if (didDrag.current) return; e.shiftKey ? toggleSelect(key, e) : (e.stopPropagation(), setSelection(new Set([key]))); }} style={{ cursor: "move" }}>
+              <g key={key} onMouseDown={(e) => startDrag(key, e)} onClick={(e) => { if (didDrag.current) return; e.shiftKey ? toggleSelect(key, e) : (e.stopPropagation(), shiftSelected.current = false, setSelection(new Set([key]))); }} style={{ cursor: "move" }}>
                 <rect x={pos.x} y={pos.y} width={pos.w} height={pos.h} rx={8} fill="#1e1e2e" stroke={isSel ? "#cba6f7" : "#45475a"} strokeWidth={isSel ? 2 : 1} />
                 <rect x={pos.x} y={pos.y} width={pos.w} height={28} rx={8} fill="#45475a" />
                 <rect x={pos.x} y={pos.y + 20} width={pos.w} height={8} fill="#45475a" />
@@ -575,7 +592,7 @@ function ERDiagram({ schema, onFocusRange }) {
             const isSel = selection.has(t.name);
             return (
               <g key={t.name} onMouseDown={(e) => startDrag(t.name, e)} onMouseEnter={() => setHovered(t.name)} onMouseLeave={() => setHovered(null)}
-                onClick={(e) => { if (didDrag.current) return; e.stopPropagation(); if (e.shiftKey) { toggleSelect(t.name, e); } else { setSelection(new Set([t.name])); } }}
+                onClick={(e) => { if (didDrag.current) return; e.stopPropagation(); if (e.shiftKey) { toggleSelect(t.name, e); } else { shiftSelected.current = false; setSelection(new Set([t.name])); } }}
                 style={{ cursor: "move" }}
                 opacity={hovered && !isHov && !relations.some((r) => (r.from === t.name && r.to === hovered) || (r.to === t.name && r.from === hovered)) ? 0.4 : 1}>
                 <rect x={pos.x + 3} y={pos.y + 3} width={TABLE_W} height={pos.h} rx={10} fill="rgba(0,0,0,0.3)" />
