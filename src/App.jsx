@@ -271,6 +271,12 @@ function layoutPositions(tables, enums) {
   return positions;
 }
 
+const POSITIONS_KEY = "pg-schema-studio-positions";
+
+function loadSavedPositions() {
+  try { return JSON.parse(localStorage.getItem(POSITIONS_KEY)) || {}; } catch { return {}; }
+}
+
 function ERDiagram({ schema }) {
   const svgRef = useRef(null);
   const containerRef = useRef(null);
@@ -284,7 +290,13 @@ function ERDiagram({ schema }) {
   const [selectedTable, setSelectedTable] = useState(null);
 
   useEffect(() => {
-    setPositions(layoutPositions(schema.tables, schema.enums));
+    const defaults = layoutPositions(schema.tables, schema.enums);
+    const saved = loadSavedPositions();
+    const merged = { ...defaults };
+    for (const key of Object.keys(defaults)) {
+      if (saved[key]) merged[key] = { ...defaults[key], x: saved[key].x, y: saved[key].y };
+    }
+    setPositions(merged);
     setSelectedTable(null);
   }, [schema]);
 
@@ -302,7 +314,20 @@ function ERDiagram({ schema }) {
     }
   }, [dragging, isPanning, zoom, pan]);
 
-  const onMouseUp = useCallback(() => { setDragging(null); setIsPanning(false); panStart.current = null; }, []);
+  const onMouseUp = useCallback(() => {
+    if (dragging) {
+      setPositions((p) => {
+        const saved = loadSavedPositions();
+        const updated = { ...saved };
+        for (const [k, v] of Object.entries(p)) updated[k] = { x: v.x, y: v.y };
+        localStorage.setItem(POSITIONS_KEY, JSON.stringify(updated));
+        return p;
+      });
+    }
+    setDragging(null);
+    setIsPanning(false);
+    panStart.current = null;
+  }, [dragging]);
 
   useEffect(() => {
     window.addEventListener("mousemove", onMouseMove);
@@ -318,13 +343,22 @@ function ERDiagram({ schema }) {
     }
   };
 
-  const onWheel = (e) => { e.preventDefault(); setZoom((z) => Math.min(2, Math.max(0.2, z + (e.deltaY > 0 ? -0.06 : 0.06)))); };
+  const onWheel = useCallback((e) => {
+    e.preventDefault();
+    const rect = containerRef.current.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const newZoom = Math.min(2, Math.max(0.2, zoom + (e.deltaY > 0 ? -0.06 : 0.06)));
+    const scale = newZoom / zoom;
+    setPan({ x: (pan.x + sx) * scale - sx, y: (pan.y + sy) * scale - sy });
+    setZoom(newZoom);
+  }, [zoom, pan]);
 
   useEffect(() => {
     const el = containerRef.current;
     if (el) el.addEventListener("wheel", onWheel, { passive: false });
     return () => { if (el) el.removeEventListener("wheel", onWheel); };
-  }, []);
+  }, [onWheel]);
 
   const relations = [];
   for (const t of schema.tables) {
@@ -342,6 +376,13 @@ function ERDiagram({ schema }) {
     return HEADER_H + (idx >= 0 ? idx : 0) * COL_H + COL_H / 2;
   };
 
+  const resetLayout = () => {
+    localStorage.removeItem(POSITIONS_KEY);
+    setPositions(layoutPositions(schema.tables, schema.enums));
+    setZoom(0.85);
+    setPan({ x: 0, y: 0 });
+  };
+
   const viewBox = `${pan.x / zoom} ${pan.y / zoom} ${(containerRef.current?.clientWidth || 1400) / zoom} ${(containerRef.current?.clientHeight || 800) / zoom}`;
   const selTable = schema.tables.find((t) => t.name === selectedTable);
   const selIndexes = schema.indexes?.filter((i) => i.table === selectedTable) || [];
@@ -355,6 +396,8 @@ function ERDiagram({ schema }) {
           <span style={{ color: "#a6adc8", fontSize: 12, padding: "4px 8px", minWidth: 44, textAlign: "center" }}>{Math.round(zoom * 100)}%</span>
           <button onClick={() => setZoom((z) => Math.max(0.2, z - 0.15))} style={zoomBtnStyle}>−</button>
           <button onClick={() => { setZoom(0.85); setPan({ x: 0, y: 0 }); }} style={{ ...zoomBtnStyle, fontSize: 11, padding: "4px 8px" }}>Reset</button>
+          <div style={{ width: 1, background: "#45475a", margin: "4px 2px" }} />
+          <button onClick={resetLayout} style={{ ...zoomBtnStyle, fontSize: 11, padding: "4px 8px", color: "#f38ba8" }} title="Reset card positions to default layout">Reset Layout</button>
         </div>
 
         <svg ref={svgRef} width="100%" height="100%" viewBox={viewBox} onMouseDown={onBgMouseDown} style={{ display: "block" }}>
