@@ -19,14 +19,14 @@ function parseSQL(sql) {
   const tableRe = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*\(([\s\S]*?)\);/gi;
   while ((m = tableRe.exec(sql))) {
     const tableName = m[1];
-    const body = m[2];
+    const body = m[2].replace(/--[^\n]*/g, ""); // strip inline comments
     const columns = [];
     const constraints = [];
     const foreignKeys = [];
     const lines = splitTopLevel(body);
 
     for (const raw of lines) {
-      const line = raw.trim();
+      const line = raw.replace(/\s+/g, " ").trim(); // collapse multi-line into one
       if (!line) continue;
 
       if (/^\s*(CONSTRAINT|PRIMARY\s+KEY|UNIQUE|CHECK|FOREIGN\s+KEY)/i.test(line)) {
