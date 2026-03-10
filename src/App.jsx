@@ -578,8 +578,10 @@ CREATE TABLE task_tags (
     PRIMARY KEY (task_id, tag_id)
 );`;
 
+const STORAGE_KEY = "pg-schema-studio-sql";
+
 export default function App() {
-  const [sql, setSql] = useState(DEFAULT_SQL);
+  const [sql, setSql] = useState(() => localStorage.getItem(STORAGE_KEY) ?? DEFAULT_SQL);
   const [splitView, setSplitView] = useState(true);
   const [activeTab, setActiveTab] = useState("diagram");
   const [parseError, setParseError] = useState(null);
@@ -603,8 +605,13 @@ export default function App() {
     indexes: schema.indexes?.length || 0,
   }), [schema]);
 
-  const handleClear = () => setSql("");
-  const handleReset = () => setSql(DEFAULT_SQL);
+  const handleSqlChange = (value) => {
+    setSql(value);
+    localStorage.setItem(STORAGE_KEY, value);
+  };
+
+  const handleClear = () => handleSqlChange("");
+  const handleReset = () => handleSqlChange(DEFAULT_SQL);
   const handleCopy = () => { navigator.clipboard.writeText(sql); };
   const handleDownload = () => {
     const blob = new Blob([sql], { type: "text/plain" });
@@ -667,7 +674,7 @@ export default function App() {
         {(splitView || activeTab === "editor") && (
           <div style={{ width: splitView ? "42%" : "100%", display: "flex", flexDirection: "column", borderRight: splitView ? "2px solid #313244" : "none", flexShrink: 0 }}>
             <div style={{ flex: 1, overflow: "hidden", background: "#1e1e2e" }}>
-              <SQLEditor value={sql} onChange={setSql} />
+              <SQLEditor value={sql} onChange={handleSqlChange} />
             </div>
           </div>
         )}
