@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import Brainstorm from "./Brainstorm";
 
 // ── SQL Parser ──────────────────────────────────────────────────────────────
 function parseSQL(sql) {
@@ -766,6 +767,7 @@ const STORAGE_KEY = "pg-schema-studio-sql";
 
 export default function App() {
   const [sql, setSql] = useState(() => localStorage.getItem(STORAGE_KEY) ?? DEFAULT_SQL);
+  const [currentPage, setCurrentPage] = useState("schema");
   const [splitView, setSplitView] = useState(true);
   const [activeTab, setActiveTab] = useState("diagram");
   const [parseError, setParseError] = useState(null);
@@ -818,65 +820,87 @@ export default function App() {
           <span style={{ fontSize: 10, color: "#6c7086", background: "#313244", padding: "2px 6px", borderRadius: 4 }}>PostgreSQL</span>
         </div>
 
-        <div style={{ display: "flex", gap: 2, background: "#11111b", borderRadius: 6, padding: 2 }}>
-          {splitView ? (
-            <TabBtn active label="Split View" onClick={() => {}} />
-          ) : (
-            <>
-              <TabBtn active={activeTab === "editor"} label="Editor" onClick={() => setActiveTab("editor")} />
-              <TabBtn active={activeTab === "diagram"} label="Diagram" onClick={() => setActiveTab("diagram")} />
-            </>
-          )}
-        </div>
-        <button onClick={() => setSplitView(!splitView)} style={toolBtnStyle} title={splitView ? "Single view" : "Split view"}>
-          {splitView ? "⊞" : "⊟"}
-        </button>
-
-        <div style={{ flex: 1 }} />
-
-        <div style={{ display: "flex", gap: 12, marginRight: 12 }}>
-          <Stat label="Tables" value={stats.tables} color="#89b4fa" />
-          <Stat label="Enums" value={stats.enums} color="#cba6f7" />
-          <Stat label="Cols" value={stats.columns} color="#a6e3a1" />
-          <Stat label="FKs" value={stats.relations} color="#f9e2af" />
-          <Stat label="Idx" value={stats.indexes} color="#94e2d5" />
+        {/* Global Navigation */}
+        <div style={{ display: "flex", gap: 8, marginRight: 16 }}>
+          <button 
+            onClick={() => setCurrentPage("schema")}
+            style={{ ...toolBtnStyle, background: currentPage === "schema" ? "#313244" : "transparent", fontWeight: currentPage === "schema" ? 700 : 400, color: currentPage === "schema" ? "#cdd6f4" : "#6c7086", borderColor: currentPage === "schema" ? "#89b4fa" : "transparent" }}
+          >Schema</button>
+          <button 
+            onClick={() => setCurrentPage("brainstorm")}
+            style={{ ...toolBtnStyle, background: currentPage === "brainstorm" ? "#313244" : "transparent", fontWeight: currentPage === "brainstorm" ? 700 : 400, color: currentPage === "brainstorm" ? "#f9e2af" : "#6c7086", borderColor: currentPage === "brainstorm" ? "#f9e2af" : "transparent" }}
+          >Brainstorm</button>
         </div>
 
-        <div style={{ width: 1, height: 24, background: "#313244" }} />
-        <button onClick={handleCopy} style={toolBtnStyle}>Copy SQL</button>
-        <button onClick={handleDownload} style={toolBtnStyle}>Download .sql</button>
-        <button onClick={handleClear} style={toolBtnStyle}>Clear</button>
-        <button onClick={handleReset} style={{ ...toolBtnStyle, color: "#94e2d5" }}>Demo</button>
+        {currentPage === "schema" && (
+          <>
+            <div style={{ display: "flex", gap: 2, background: "#11111b", borderRadius: 6, padding: 2 }}>
+              {splitView ? (
+                <TabBtn active label="Split View" onClick={() => {}} />
+              ) : (
+                <>
+                  <TabBtn active={activeTab === "editor"} label="Editor" onClick={() => setActiveTab("editor")} />
+                  <TabBtn active={activeTab === "diagram"} label="Diagram" onClick={() => setActiveTab("diagram")} />
+                </>
+              )}
+            </div>
+            <button onClick={() => setSplitView(!splitView)} style={toolBtnStyle} title={splitView ? "Single view" : "Split view"}>
+              {splitView ? "⊞" : "⊟"}
+            </button>
+
+            <div style={{ flex: 1 }} />
+
+            <div style={{ display: "flex", gap: 12, marginRight: 12 }}>
+              <Stat label="Tables" value={stats.tables} color="#89b4fa" />
+              <Stat label="Enums" value={stats.enums} color="#cba6f7" />
+              <Stat label="Cols" value={stats.columns} color="#a6e3a1" />
+              <Stat label="FKs" value={stats.relations} color="#f9e2af" />
+              <Stat label="Idx" value={stats.indexes} color="#94e2d5" />
+            </div>
+
+            <div style={{ width: 1, height: 24, background: "#313244" }} />
+            <button onClick={handleCopy} style={toolBtnStyle}>Copy SQL</button>
+            <button onClick={handleDownload} style={toolBtnStyle}>Download .sql</button>
+            <button onClick={handleClear} style={toolBtnStyle}>Clear</button>
+            <button onClick={handleReset} style={{ ...toolBtnStyle, color: "#94e2d5" }}>Demo</button>
+          </>
+        )}
       </div>
 
-      {parseError && (
+      {parseError && currentPage === "schema" && (
         <div style={{ background: "#f38ba822", color: "#f38ba8", padding: "6px 16px", fontSize: 12, fontFamily: "monospace", borderBottom: "1px solid #f38ba844" }}>
           Parse error: {parseError}
         </div>
       )}
 
-      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
-        {(splitView || activeTab === "editor") && (
-          <div style={{ width: splitView ? "42%" : "100%", display: "flex", flexDirection: "column", borderRight: splitView ? "2px solid #313244" : "none", flexShrink: 0 }}>
-            <div style={{ flex: 1, overflow: "hidden", background: "#1e1e2e" }}>
-              <SQLEditor value={sql} onChange={handleSqlChange} focusRange={focusRange} />
-            </div>
-          </div>
-        )}
-        {(splitView || activeTab === "diagram") && (
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            {schema.tables.length === 0 && !parseError ? (
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "#585b70", flexDirection: "column", gap: 8 }}>
-                <span style={{ fontSize: 40, opacity: 0.3 }}>◇</span>
-                <span style={{ fontSize: 14 }}>Paste PostgreSQL DDL in the editor to visualize</span>
-                <span style={{ fontSize: 12, color: "#45475a" }}>or click Demo to load a sample schema</span>
+      {currentPage === "brainstorm" ? (
+        <div style={{ flex: 1, position: "relative" }}>
+          <Brainstorm />
+        </div>
+      ) : (
+        <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+          {(splitView || activeTab === "editor") && (
+            <div style={{ width: splitView ? "42%" : "100%", display: "flex", flexDirection: "column", borderRight: splitView ? "2px solid #313244" : "none", flexShrink: 0 }}>
+              <div style={{ flex: 1, overflow: "hidden", background: "#1e1e2e" }}>
+                <SQLEditor value={sql} onChange={handleSqlChange} focusRange={focusRange} />
               </div>
-            ) : (
-              <ERDiagram schema={schema} onFocusRange={setFocusRange} />
-            )}
-          </div>
-        )}
-      </div>
+            </div>
+          )}
+          {(splitView || activeTab === "diagram") && (
+            <div style={{ flex: 1, overflow: "hidden" }}>
+              {schema.tables.length === 0 && !parseError ? (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "#585b70", flexDirection: "column", gap: 8 }}>
+                  <span style={{ fontSize: 40, opacity: 0.3 }}>◇</span>
+                  <span style={{ fontSize: 14 }}>Paste PostgreSQL DDL in the editor to visualize</span>
+                  <span style={{ fontSize: 12, color: "#45475a" }}>or click Demo to load a sample schema</span>
+                </div>
+              ) : (
+                <ERDiagram schema={schema} onFocusRange={setFocusRange} />
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
